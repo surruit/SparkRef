@@ -119,3 +119,7 @@ hs_err_pid*
 ### Scala ###
 
 # End of https://www.toptal.com/developers/gitignore/api/intellij+all,scala,java
+
+### Compilados ###
+
+target/

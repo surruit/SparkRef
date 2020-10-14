@@ -1,55 +1,9 @@
-package escritura_optimizada
+package escritura_optimizada.sin_particiones
 
 import org.apache.hadoop.fs.{FileSystem, Path}
-import org.apache.spark.sql.{DataFrame, SaveMode, SparkSession}
-import generador_datos.GeneradorAleatorio._
+import org.apache.spark.sql.{DataFrame, SparkSession}
 
-object SinParticiones128MB {
-  def main(args: Array[String]): Unit = {
-
-    val spark = SparkSession
-      .builder
-      .appName("SinParticiones128MB")
-      .enableHiveSupport()
-      .getOrCreate()
-
-    val df_datos = getDataframe(spark)
-
-    val sparkStaging = getSparkStagingDir(spark).get
-
-    val sizePerRow1 = calcSizePerRow(spark, df_datos, sparkStaging)
-
-    val sizePerRow2 = calcSizePerRow2(spark, df_datos, sparkStaging)
-
-    val partitions = calcTargetPartitions(df_datos, sizePerRow1, 128)
-
-    df_datos
-      .repartition(partitions)
-      .write
-      .format("parquet")
-      .option("compression","snappy")
-      .mode(SaveMode.Overwrite)
-      .saveAsTable("default.empleados")
-  }
-
-  //Genera un dataframe de datos aleatorios
-  def getDataframe(spark: SparkSession): DataFrame = {
-    val df_1B = spark.range(0, 1000000000L, 1, 200)
-
-    val df_datos = df_1B
-      .withColumn("id_categoria", func_randomNum(0, 1000000)())
-      .withColumn("salario", func_randomNum(15000, 50000)())
-      .withColumn("dimension1", func_randomEnum(Seq("A", "B", "C", "D"))())
-      .withColumn("dimension2", func_randomEnumProb(
-        Map(
-          "Hombre" -> 0.8F,
-          "Mujer" -> 0.15F,
-          "Otro" -> 0.05F
-        ))())
-
-    df_datos
-  }
-
+object WriterUtils {
   //calcula el path a la ruta de hdfs "/user/${user}/.sparkStaging/application_1602582108394_0023"
   def getSparkStagingDir(spark: SparkSession): Option[String] ={
     val user = spark.sparkContext.sparkUser
@@ -122,6 +76,42 @@ object SinParticiones128MB {
     println("Tamaño por registro: " + bytes10000/10000 + " Bytes")
 
     bytes10000/10000
+  }
+
+  //Calcula el tamaño por registro, utiliza un muestreo no aleatorio de 250000 registros (lento, preciso)
+  def calcSizePerRow3(spark: SparkSession, dataFrame: DataFrame, tempFolder: String): Double ={
+    println("Partition count: " + dataFrame.rdd.partitions.length)
+    println("StagingDir: " + tempFolder)
+
+    val totalCount = dataFrame.count()
+
+    val sampleFraction = (250000D/totalCount)* 1.5
+
+    //Escribe a disco una pequeña muestra del dataframe para calcular su ocupacion en disco
+    val df_reduced = dataFrame
+      .sample(false, sampleFraction)
+      .limit(250000)
+      .repartition(1)
+
+    require(df_reduced.count() == 250000)
+
+    df_reduced
+      .write
+      .option("compression", "snappy")
+      .parquet(tempFolder + "/EstimadorTamanio")
+
+    val hadoopFS = FileSystem.get(spark.sparkContext.hadoopConfiguration)
+
+    val folderPath = new Path(tempFolder + "/EstimadorTamanio")
+
+    val bytes250000 = hadoopFS.getContentSummary(folderPath).getLength.toDouble
+
+    hadoopFS.delete(folderPath, true)
+
+    println("Tamaño calculado para 250000 registros: " + bytes250000 + " Bytes")
+    println("Tamaño por registro: " + bytes250000/250000 + " Bytes")
+
+    bytes250000/250000
   }
 
   //Calcula cuantas particiones son necesarias para el tamaño de fichero objetivo
